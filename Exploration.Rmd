@@ -1,0 +1,297 @@
+---
+title: "Clinical Data Science Analysis of MIMIC-III"
+author: "Aashna Kothari"
+date: "2026-01-16"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, message = FALSE}
+library(tidyverse)
+library(magrittr)
+library(bigrquery)
+```
+
+Connection to google BigQuery
+```{r}
+
+con <- DBI::dbConnect(
+  drv = bigquery(),
+  project = "learnclinicaldatascience",
+  dataset = "mimic3_demo",
+  billing = "learnclinicaldatascience"
+)
+
+```
+
+
+```{r}
+admissions <- tbl(con, "ADMISSIONS")
+df <-admissions %>% collect()
+
+patients <- tbl(con, "PATIENTS")
+df <-patients %>% collect()
+
+caregivers <- tbl(con, "CAREGIVERS")
+df <-caregivers %>% collect()
+
+diagnoses_icd <- tbl(con, "DIAGNOSES_ICD")
+df <- diagnoses_icd %>% collect()
+
+icustays <- tbl(con, "ICUSTAYS")
+df <- icustays %>% collect()
+
+prescriptions <- tbl(con, "PRESCRIPTIONS")
+df <- prescriptions %>% collect()
+
+microbiologyevents <- tbl(con, "MICROBIOLOGYEVENTS")
+df <- microbiologyevents %>% collect()
+
+drgcodes <- tbl(con, "DRGCODES")
+df <- drgcodes %>% collect()
+
+d_icd_diagnoses<- tbl(con, "D_ICD_DIAGNOSES")
+df <- d_icd_diagnoses %>% collect()
+
+
+
+```
+
+## Admissions Dataset Overview
+
+The admissions dataset has **129 observations** and **19 variables**, capturing "every unique hospitalization for each patient in the database"  
+```{r}
+library(gt)
+library(gtExtras)
+library(scales)
+
+
+
+admissions %>% 
+  head(10) %>% 
+  gt() %>% 
+  gt_theme_pff() %>% 
+  tab_header(
+    title = "Admissions Dataset",
+  ) %>% 
+  data_color(
+    columns = HOSPITAL_EXPIRE_FLAG,
+    colors = scales:: col_factor(
+      palette = c("#f5c5bd", "#cbf5bd"), 
+      domain = c(0, 1)
+    )
+  ) 
+    
+  
+
+```
+
+
+
+
+
+## Analyzing the ethnicities of the ICU admitted patients
+
+```{r}
+library(dplyr)
+admissions %>% 
+  distinct(ETHNICITY)
+
+```
+
+As you can see, there are 9 distinct ethnicities present in this dataset. Let's explore the distribution of patient ethnicities in order to bettter understand the demographic composition of ICU patients. 
+
+```{r}
+
+# creating a new df, keepingonly the first row for each SUBJECT_ID in admissions table since the same patient could be admitted more than once which is redundant data
+admissions_unique <- admissions %>%
+  distinct(SUBJECT_ID, .keep_all = TRUE)
+
+#creating a barplot showing the frequency of each ethnicity 
+ggplot(data=admissions_unique) +
+  geom_bar(mapping=aes(x=ETHNICITY)) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+admissions_unique %>% 
+ group_by(ETHNICITY) %>% 
+ summarize(count = n(), .groups="drop")
+
+
+```
+
+
+## Exploring other variables including insurance, admission & discharge location
+```{r}
+
+#looking at insurance
+admissions_unique %>% 
+  distinct(INSURANCE)
+
+admissions_unique %>% 
+  group_by(INSURANCE) %>% 
+  summarize(count =n(), .groups="drop")
+
+#barplot of admission location 
+ggplot(data=admissions) +
+  geom_bar(mapping=aes(x=ADMISSION_LOCATION)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#barplot of discharge location
+ggplot(data=admissions) +
+  geom_bar(mapping=aes(x=DISCHARGE_LOCATION)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+#Relationship between admission location and death
+#Since both are categorical, we will use a stacked barplot
+admissions_local <- admissions %>%
+  select(ADMISSION_LOCATION,HOSPITAL_EXPIRE_FLAG) %>%  # just the column you need
+  collect()  # bring into R memory
+
+admissions_local <- admissions_local %>%
+  mutate(
+    DEAD_FLAG = factor(HOSPITAL_EXPIRE_FLAG,
+                       levels = c(0, 1),
+                       labels = c("Not Dead", "Dead")) #convert to categorical to construct barplot
+  )
+
+#stacked bar plot generated
+ggplot(data=admissions_local) +
+  geom_bar(mapping=aes(x=ADMISSION_LOCATION, fill=DEAD_FLAG)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+
+
+
+```
+Since most of the patients admitted to this hospital were on medicare, it is evident that this dataset consists heavily of an aged, elderly white population. This intuitively makes sense as elderly patients tend to be in critical health conditions (ICU), and MIMIC contains ICU patient data.
+
+
+Looking at the bar graph for admission locations, it is evident that most patients were emergency room admits, followed by transfer from hospital.
+Looking at the bar graph for discharge location, we can see that most patients died in the ICU unit they were admitted into or were moved into senior nursing facility upon discharge. 
+
+Stacked bar plot shows relationship between admission location and death. 
+
+## Let's now get a comprehensive picture of ICD-9 diagnoses. 
+
+```{r}
+
+#inner join between ICD-9 codes and their long form 
+
+updated_diagnoses <- inner_join(diagnoses_icd, d_icd_diagnoses, by = "ICD9_CODE") %>% 
+  distinct(SUBJECT_ID, HADM_ID, LONG_TITLE, ICD9_CODE)
+
+#let's see frequency of diagnoses
+#In our patient
+updated_diagnoses %>% 
+  distinct(LONG_TITLE)
+
+updated_diagnoses %>% 
+  group_by(ICD9_CODE)  %>% 
+  summarize(count = n(), .groups="drop")  %>%
+  arrange(desc(count))   # largest count first
+
+d_icd_diagnoses %>% 
+  filter(ICD9_CODE=="4019")
+
+#number of diagnoses per patient (let's create a barplot)
+df <- updated_diagnoses %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarize(count=n(), .groups="drop") %>% 
+  arrange(desc(count))
+
+ggplot(data=df) + 
+  geom_histogram(mapping=aes(x=count), binwidth = 12, boundary=0, color = "black", fill="lightblue") +
+  labs(
+    title = "Diagnoses Per Patient",
+    x = "Number of Diagnoses",
+    y= "Number of Patients"
+  ) 
+
+
+
+
+```
+Across this cohort of 100 patients, a total of 500 distinct ICD-9 diagnoses were recorded. 
+The diagnoses that was recorded the most is "Hypertension NOS" or "Unspecified Essential Hypertension". 
+One patient was diagnosed over 200 times 
+
+
+Analyzing microbiology events table
+```{r}
+
+#Seeing what all specimen were collected
+microbiologyevents %>% 
+  distinct(SPEC_TYPE_DESC)
+
+microbiologyevents %>% 
+  group_by(SPEC_TYPE_DESC) %>% 
+  summarize(count=n(), .groups="drop") %>% 
+  arrange(desc(count))
+
+
+ new <- microbiologyevents %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarize(count=n(), .groups="drop") %>% 
+  arrange(desc(count))
+
+
+admissions %>% 
+  filter(SUBJECT_ID %in% c(41976, 41914, 40310)) %>% 
+   select(SUBJECT_ID, HOSPITAL_EXPIRE_FLAG) 
+
+
+
+
+
+```
+Blood was the most commonly collected specimen, followed by urine. 
+Patient 41976 had the most specimens collected overall (360) followed by patient 41914 with 122, and then 40310. 
+Let's check if these patients died during their ICU stay at this hospital? 40310 died. 
+
+
+## Let's look the relationship between ICU Length of Stay (los) and in-hospital mortality
+
+```{r}
+
+icu_merged <- icustays %>%
+  left_join(admissions, by = c("SUBJECT_ID", "HADM_ID")) %>%
+collect()
+
+
+icu_merged <-icu_merged %>% 
+  mutate(
+    HOSPITAL_EXPIRE_FLAG = factor(HOSPITAL_EXPIRE_FLAG,
+                                       levels = c(0, 1),
+                                       labels = c("Not dead", "Dead"))
+  )
+  
+
+#Let's make a side by side boxplot
+ggplot(data=icu_merged) + 
+  geom_boxplot(mapping=aes(x=HOSPITAL_EXPIRE_FLAG, y=LOS)) +
+  labs(
+    title= "Length of ICU Stay vs in-hospital mortality",
+    x = "in-hospital mortality status",
+    y = "Length of ICU Stay"
+  )
+
+
+
+```
+
+
+
+
+
+
